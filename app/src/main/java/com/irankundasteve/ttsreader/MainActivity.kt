@@ -577,8 +577,7 @@ private fun VoiceSettingsSheet(
                     Icon(
                         imageVector = Icons.Filled.Refresh,
                         contentDescription = null,
-                    },
-                )
+                    )
                     Spacer(modifier = Modifier.size(8.dp))
                     Text(text = "Reset")
                 }
