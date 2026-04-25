@@ -23,6 +23,14 @@ enum class PlaybackStatus {
     PAUSED,
 }
 
+data class VoiceSettings(
+    val rate: Float = 1.0f,
+    val pitch: Float = 1.0f,
+) {
+    val isDefault: Boolean
+        get() = rate == 1.0f && pitch == 1.0f
+}
+
 data class PlaybackUiState(
     val status: PlaybackStatus = PlaybackStatus.IDLE,
     val activeText: String = "",
@@ -53,10 +61,18 @@ private data class PlaybackSession(
     val utteranceId: String,
     val text: String,
     val language: SupportedLanguage,
+    val voiceSettings: VoiceSettings,
     val words: List<WordBoundary>,
-    val startWordIndex: Int,
     val startOffset: Int,
     val totalDurationMs: Long,
+)
+
+private data class PreviewRestore(
+    val text: String,
+    val language: SupportedLanguage,
+    val progress: Float,
+    val voiceSettings: VoiceSettings,
+    val wasPaused: Boolean,
 )
 
 class TtsReaderApplication : Application() {
@@ -65,6 +81,8 @@ class TtsReaderApplication : Application() {
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
     private var playbackSession: PlaybackSession? = null
+    private var previewUtteranceId: String? = null
+    private var previewRestore: PreviewRestore? = null
     private var pausedWordIndex = 0
     private var currentWordIndex = 0
     private var pauseRequested = false
@@ -114,6 +132,7 @@ class TtsReaderApplication : Application() {
     fun startPlayback(
         text: String,
         language: SupportedLanguage,
+        voiceSettings: VoiceSettings,
         startFromProgress: Float = 0f,
     ): Boolean {
         val engine = textToSpeech ?: return false
@@ -131,19 +150,23 @@ class TtsReaderApplication : Application() {
             return false
         }
 
+        applyVoiceSettings(engine, voiceSettings)
+
         val startWordIndex = progressToWordIndex(startFromProgress, words.lastIndex)
         val startOffset = words[startWordIndex].start
         val session = PlaybackSession(
             utteranceId = "utterance-${SystemClock.elapsedRealtimeNanos()}",
             text = text,
             language = language,
+            voiceSettings = voiceSettings,
             words = words,
-            startWordIndex = startWordIndex,
             startOffset = startOffset,
-            totalDurationMs = estimateDurationMs(words.size),
+            totalDurationMs = estimateDurationMs(words.size, voiceSettings.rate),
         )
 
         playbackSession = session
+        previewUtteranceId = null
+        previewRestore = null
         pausedWordIndex = startWordIndex
         currentWordIndex = startWordIndex
         pauseRequested = false
@@ -195,14 +218,19 @@ class TtsReaderApplication : Application() {
             return false
         }
 
+        val session = playbackSession
         return startPlayback(
             text = state.activeText,
             language = state.selectedLanguage,
+            voiceSettings = session?.voiceSettings ?: VoiceSettings(),
             startFromProgress = state.progressFraction,
         )
     }
 
-    fun seekPlayback(progress: Float): Boolean {
+    fun seekPlayback(
+        progress: Float,
+        voiceSettings: VoiceSettings,
+    ): Boolean {
         val session = playbackSession ?: return false
         val targetIndex = progressToWordIndex(progress, session.words.lastIndex)
         pausedWordIndex = targetIndex
@@ -215,12 +243,18 @@ class TtsReaderApplication : Application() {
             -> startPlayback(
                 text = session.text,
                 language = session.language,
+                voiceSettings = voiceSettings,
                 startFromProgress = progress,
             )
 
             PlaybackStatus.PAUSED -> {
+                val updatedSession = session.copy(
+                    voiceSettings = voiceSettings,
+                    totalDurationMs = estimateDurationMs(session.words.size, voiceSettings.rate),
+                )
+                playbackSession = updatedSession
                 _playbackState.value = buildPlaybackState(
-                    session = session,
+                    session = updatedSession,
                     status = PlaybackStatus.PAUSED,
                     wordIndex = targetIndex,
                     currentRange = range,
@@ -230,6 +264,92 @@ class TtsReaderApplication : Application() {
 
             PlaybackStatus.IDLE -> false
         }
+    }
+
+    fun updateVoiceSettings(voiceSettings: VoiceSettings): Boolean {
+        val session = playbackSession ?: return false
+        val updatedSession = session.copy(
+            voiceSettings = voiceSettings,
+            totalDurationMs = estimateDurationMs(session.words.size, voiceSettings.rate),
+        )
+        playbackSession = updatedSession
+
+        return when (_playbackState.value.status) {
+            PlaybackStatus.PLAYING,
+            PlaybackStatus.PREPARING,
+            -> startPlayback(
+                text = updatedSession.text,
+                language = updatedSession.language,
+                voiceSettings = voiceSettings,
+                startFromProgress = _playbackState.value.progressFraction,
+            )
+
+            PlaybackStatus.PAUSED -> {
+                _playbackState.value = buildPlaybackState(
+                    session = updatedSession,
+                    status = PlaybackStatus.PAUSED,
+                    wordIndex = pausedWordIndex,
+                    currentRange = updatedSession.wordRange(pausedWordIndex),
+                )
+                true
+            }
+
+            PlaybackStatus.IDLE -> false
+        }
+    }
+
+    fun previewVoice(
+        language: SupportedLanguage,
+        voiceSettings: VoiceSettings,
+    ): Boolean {
+        val engine = textToSpeech ?: return false
+        if (!requestAudioFocus()) {
+            return false
+        }
+
+        if (!applyLocale(engine, Locale.forLanguageTag(language.tag))) {
+            abandonAudioFocus()
+            return false
+        }
+
+        applyVoiceSettings(engine, voiceSettings)
+
+        val currentState = _playbackState.value
+        previewRestore = if (currentState.hasSession) {
+            PreviewRestore(
+                text = currentState.activeText,
+                language = currentState.selectedLanguage,
+                progress = currentState.progressFraction,
+                voiceSettings = voiceSettings,
+                wasPaused = currentState.status == PlaybackStatus.PAUSED,
+            )
+        } else {
+            null
+        }
+
+        previewUtteranceId = "preview-${SystemClock.elapsedRealtimeNanos()}"
+        pauseRequested = false
+        textToSpeech?.stop()
+
+        if (currentState.hasSession) {
+            _playbackState.value = currentState.copy(status = PlaybackStatus.PAUSED)
+        }
+
+        val result = engine.speak(
+            "This is a voice preview.",
+            TextToSpeech.QUEUE_FLUSH,
+            Bundle(),
+            previewUtteranceId,
+        )
+
+        if (result == TextToSpeech.ERROR) {
+            previewUtteranceId = null
+            previewRestore = null
+            abandonAudioFocus()
+            return false
+        }
+
+        return true
     }
 
     fun stopPlayback() {
@@ -247,6 +367,10 @@ class TtsReaderApplication : Application() {
         engine?.setOnUtteranceProgressListener(
             object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
+                    if (utteranceId == previewUtteranceId) {
+                        return
+                    }
+
                     val session = playbackSession ?: return
                     if (utteranceId != session.utteranceId) {
                         return
@@ -266,6 +390,10 @@ class TtsReaderApplication : Application() {
                     end: Int,
                     frame: Int,
                 ) {
+                    if (utteranceId == previewUtteranceId) {
+                        return
+                    }
+
                     val session = playbackSession ?: return
                     if (utteranceId != session.utteranceId) {
                         return
@@ -288,6 +416,23 @@ class TtsReaderApplication : Application() {
                 }
 
                 override fun onDone(utteranceId: String?) {
+                    if (utteranceId == previewUtteranceId) {
+                        val restore = previewRestore
+                        previewUtteranceId = null
+                        previewRestore = null
+                        if (restore != null && !restore.wasPaused) {
+                            startPlayback(
+                                text = restore.text,
+                                language = restore.language,
+                                voiceSettings = restore.voiceSettings,
+                                startFromProgress = restore.progress,
+                            )
+                        } else {
+                            abandonAudioFocus()
+                        }
+                        return
+                    }
+
                     val session = playbackSession ?: return
                     if (utteranceId != session.utteranceId) {
                         return
@@ -306,6 +451,13 @@ class TtsReaderApplication : Application() {
                 }
 
                 override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                    if (utteranceId == previewUtteranceId) {
+                        previewUtteranceId = null
+                        previewRestore = null
+                        abandonAudioFocus()
+                        return
+                    }
+
                     if (!pauseRequested) {
                         return
                     }
@@ -314,6 +466,10 @@ class TtsReaderApplication : Application() {
                 }
 
                 override fun onError(utteranceId: String?) {
+                    if (utteranceId == previewUtteranceId) {
+                        previewUtteranceId = null
+                        previewRestore = null
+                    }
                     playbackSession = null
                     pausedWordIndex = 0
                     currentWordIndex = 0
@@ -348,6 +504,14 @@ class TtsReaderApplication : Application() {
             result != TextToSpeech.ERROR
     }
 
+    private fun applyVoiceSettings(
+        engine: TextToSpeech?,
+        voiceSettings: VoiceSettings,
+    ) {
+        engine?.setSpeechRate(voiceSettings.rate)
+        engine?.setPitch(voiceSettings.pitch)
+    }
+
     private fun buildPlaybackState(
         session: PlaybackSession,
         status: PlaybackStatus,
@@ -380,8 +544,11 @@ class TtsReaderApplication : Application() {
         }.toList()
     }
 
-    private fun estimateDurationMs(wordCount: Int): Long {
-        val wordsPerMinute = 165.0
+    private fun estimateDurationMs(
+        wordCount: Int,
+        rate: Float,
+    ): Long {
+        val wordsPerMinute = 165.0 * rate.coerceAtLeast(0.5f)
         return ((wordCount / wordsPerMinute) * 60_000.0).roundToLong().coerceAtLeast(1_000L)
     }
 
