@@ -57,6 +57,7 @@ class LaunchViewModel(
     private val app = application as TtsReaderApplication
     private val _uiState = MutableStateFlow(LaunchUiState())
     val uiState: StateFlow<LaunchUiState> = _uiState.asStateFlow()
+    val playbackState: StateFlow<PlaybackUiState> = app.playbackState
 
     init {
         initialize()
@@ -128,6 +129,65 @@ class LaunchViewModel(
             context,
             permission,
         ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    fun onPrimaryPlaybackAction(
+        text: String,
+        language: SupportedLanguage,
+    ) {
+        if (text.isBlank()) {
+            return
+        }
+
+        when (playbackState.value.status) {
+            PlaybackStatus.PLAYING,
+            PlaybackStatus.PREPARING,
+            -> app.pausePlayback()
+
+            PlaybackStatus.PAUSED -> {
+                val currentPlayback = playbackState.value
+                if (
+                    currentPlayback.activeText != text ||
+                    currentPlayback.selectedLanguage != language
+                ) {
+                    startPlayback(text, language)
+                } else {
+                    viewModelScope.launch {
+                        if (initializeTts(language)) {
+                            app.resumePlayback()
+                        }
+                    }
+                }
+            }
+
+            PlaybackStatus.IDLE -> startPlayback(text, language)
+        }
+    }
+
+    fun seekPlayback(
+        progress: Float,
+        language: SupportedLanguage,
+    ) {
+        viewModelScope.launch {
+            if (initializeTts(language)) {
+                app.seekPlayback(progress)
+            }
+        }
+    }
+
+    fun stopPlayback() {
+        app.stopPlayback()
+    }
+
+    private fun startPlayback(
+        text: String,
+        language: SupportedLanguage,
+    ) {
+        viewModelScope.launch {
+            if (initializeTts(language)) {
+                app.startPlayback(text, language)
+            }
+        }
     }
 
     companion object {

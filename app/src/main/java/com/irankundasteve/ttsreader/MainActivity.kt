@@ -3,6 +3,7 @@ package com.irankundasteve.ttsreader
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -16,7 +17,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,7 +37,9 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -47,17 +49,19 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,6 +72,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -90,9 +96,14 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val uiState by viewModel.uiState.collectAsState()
+            val playbackState by viewModel.playbackState.collectAsState()
             TTSReaderTheme(darkTheme = uiState.darkTheme) {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    LaunchRoute(uiState = uiState)
+                    LaunchRoute(
+                        uiState = uiState,
+                        playbackState = playbackState,
+                        viewModel = viewModel,
+                    )
                 }
             }
         }
@@ -100,7 +111,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun LaunchRoute(uiState: LaunchUiState) {
+private fun LaunchRoute(
+    uiState: LaunchUiState,
+    playbackState: PlaybackUiState,
+    viewModel: LaunchViewModel,
+) {
     AnimatedContent(
         targetState = uiState.isReady,
         transitionSpec = {
@@ -110,7 +125,11 @@ private fun LaunchRoute(uiState: LaunchUiState) {
         label = "launch_transition",
     ) { ready ->
         if (ready) {
-            HomeScreen(uiState = uiState)
+            HomeScreen(
+                uiState = uiState,
+                playbackState = playbackState,
+                viewModel = viewModel,
+            )
         } else {
             SplashScreen()
         }
@@ -164,19 +183,60 @@ private fun SplashScreen() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeScreen(uiState: LaunchUiState) {
-    var text by rememberSaveable { mutableStateOf("") }
+private fun HomeScreen(
+    uiState: LaunchUiState,
+    playbackState: PlaybackUiState,
+    viewModel: LaunchViewModel,
+) {
+    var textFieldValue by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(""))
+    }
     var selectedLanguage by rememberSaveable(uiState.selectedLanguage) {
         mutableStateOf(uiState.selectedLanguage)
     }
     var voiceMenuExpanded by remember { mutableStateOf(false) }
+    var sliderPosition by remember { mutableFloatStateOf(0f) }
+    var sliderIsDragging by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
     val context = LocalContext.current
     val maxCharacters = 5_000
-    val hasText = text.isNotBlank()
+    val hasText = textFieldValue.text.isNotBlank()
+    val playbackVisible = playbackState.hasSession
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
+    }
+
+    LaunchedEffect(playbackState.progressFraction) {
+        if (!sliderIsDragging) {
+            sliderPosition = playbackState.progressFraction
+        }
+    }
+
+    LaunchedEffect(
+        playbackState.currentRange,
+        playbackState.activeText,
+        playbackState.status,
+    ) {
+        if (playbackState.hasSession && playbackState.activeText == textFieldValue.text) {
+            playbackState.currentRange?.let { range ->
+                textFieldValue = textFieldValue.copy(
+                    selection = TextRange(range.first, range.last + 1),
+                )
+            }
+        } else if (!playbackState.hasSession) {
+            val cursor = textFieldValue.selection.end.coerceIn(0, textFieldValue.text.length)
+            textFieldValue = textFieldValue.copy(selection = TextRange(cursor))
+        }
+    }
+
+    LaunchedEffect(playbackState.status, playbackState.activeText) {
+        if (
+            playbackState.status == PlaybackStatus.PREPARING &&
+            playbackState.activeText.length > 700
+        ) {
+            Toast.makeText(context, "Preparing audio...", Toast.LENGTH_SHORT).show()
+        }
     }
 
     Scaffold(
@@ -202,7 +262,10 @@ private fun HomeScreen(uiState: LaunchUiState) {
                     IconButton(
                         onClick = {
                             readClipboardText(context)?.let { pasted ->
-                                text = pasted.take(maxCharacters)
+                                if (playbackVisible) {
+                                    viewModel.stopPlayback()
+                                }
+                                textFieldValue = TextFieldValue(pasted.take(maxCharacters))
                             }
                         },
                     ) {
@@ -215,125 +278,189 @@ private fun HomeScreen(uiState: LaunchUiState) {
             )
         },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = if (hasText) ({}) else ({}),
-                modifier = Modifier.alpha(if (hasText) 1f else 0.45f),
-                containerColor = if (hasText) MintPrimary else Color(0xFF3B4E49),
-                contentColor = if (hasText) Color(0xFF062C23) else Color(0xFF9AB0AA),
-                elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 8.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.PlayArrow,
-                    contentDescription = "Play",
-                    modifier = Modifier.size(28.dp),
-                )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (playbackVisible) {
+                    FloatingActionButton(
+                        onClick = { viewModel.stopPlayback() },
+                        containerColor = Color(0xFF2A3432),
+                        contentColor = Color(0xFFF2F7F5),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Stop,
+                            contentDescription = "Stop",
+                        )
+                    }
+                }
+
+                FloatingActionButton(
+                    onClick = {
+                        if (!hasText) {
+                            Toast.makeText(
+                                context,
+                                "Please enter text",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                            return@FloatingActionButton
+                        }
+
+                        viewModel.onPrimaryPlaybackAction(
+                            text = textFieldValue.text,
+                            language = selectedLanguage,
+                        )
+                    },
+                    modifier = Modifier.alpha(if (hasText) 1f else 0.45f),
+                    containerColor = if (hasText) MintPrimary else Color(0xFF3B4E49),
+                    contentColor = if (hasText) Color(0xFF062C23) else Color(0xFF9AB0AA),
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 8.dp),
+                ) {
+                    Icon(
+                        imageVector = if (
+                            playbackState.status == PlaybackStatus.PLAYING ||
+                            playbackState.status == PlaybackStatus.PREPARING
+                        ) {
+                            Icons.Filled.Pause
+                        } else {
+                            Icons.Filled.PlayArrow
+                        },
+                        contentDescription = "Toggle playback",
+                        modifier = Modifier.size(28.dp),
+                    )
+                }
             }
         },
     ) { innerPadding ->
-        BoxWithConstraints(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
                 .imePadding()
                 .navigationBarsPadding()
                 .padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
+            Text(
+                text = buildString {
+                    append(selectedLanguage.voiceLabel)
+                    append(" • ")
+                    append(if (uiState.ttsReady) "TTS ready" else "TTS unavailable")
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.6f)
+                    .background(
+                        color = DarkSurface,
+                        shape = MaterialTheme.shapes.large,
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = Color(0xFF23322E),
+                        shape = MaterialTheme.shapes.large,
+                    )
+                    .padding(16.dp),
+            ) {
+                OutlinedTextField(
+                    value = textFieldValue,
+                    onValueChange = { updated ->
+                        val normalized = normalizeTextFieldValue(updated, maxCharacters)
+                        if (playbackVisible && normalized.text != textFieldValue.text) {
+                            viewModel.stopPlayback()
+                        }
+                        textFieldValue = normalized
+                    },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .focusRequester(focusRequester),
+                    placeholder = {
+                        Text(text = "Type or paste text here...")
+                    },
+                    trailingIcon = {
+                        if (textFieldValue.text.isNotEmpty()) {
+                            IconButton(
+                                onClick = {
+                                    if (playbackVisible) {
+                                        viewModel.stopPlayback()
+                                    }
+                                    textFieldValue = TextFieldValue("")
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Clear,
+                                    contentDescription = "Clear text",
+                                )
+                            }
+                        }
+                    },
+                    textStyle = MaterialTheme.typography.bodyLarge,
+                    minLines = 12,
+                    maxLines = Int.MAX_VALUE,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                )
+
+                Text(
+                    text = "${textFieldValue.text.length} / $maxCharacters",
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .background(
+                            color = DarkSurface.copy(alpha = 0.92f),
+                            shape = MaterialTheme.shapes.small,
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            VoiceSelector(
+                selectedLanguage = selectedLanguage,
+                expanded = voiceMenuExpanded,
+                onExpandedChange = { voiceMenuExpanded = it },
+                onLanguageSelected = {
+                    if (playbackVisible) {
+                        viewModel.stopPlayback()
+                    }
+                    selectedLanguage = it
+                    voiceMenuExpanded = false
+                },
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
             ) {
                 Text(
                     text = buildString {
-                        append(selectedLanguage.voiceLabel)
-                        append(" • ")
-                        append(if (uiState.ttsReady) "TTS ready" else "TTS unavailable")
+                        append("Storage ")
+                        append(if (uiState.permissions.storageGranted) "ready" else "not granted")
+                        append(" • Media ")
+                        append(if (uiState.permissions.mediaGranted) "ready" else "not granted")
                     },
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
                 )
+            }
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .fillMaxHeight(0.6f)
-                        .background(
-                            color = DarkSurface,
-                            shape = MaterialTheme.shapes.large,
-                        )
-                        .border(
-                            width = 1.dp,
-                            color = Color(0xFF23322E),
-                            shape = MaterialTheme.shapes.large,
-                        )
-                        .padding(16.dp),
-                ) {
-                    OutlinedTextField(
-                        value = text,
-                        onValueChange = { updated ->
-                            text = updated.take(maxCharacters)
-                        },
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .focusRequester(focusRequester),
-                        placeholder = {
-                            Text(text = "Type or paste text here...")
-                        },
-                        trailingIcon = {
-                            if (text.isNotEmpty()) {
-                                IconButton(onClick = { text = "" }) {
-                                    Icon(
-                                        imageVector = Icons.Filled.Clear,
-                                        contentDescription = "Clear text",
-                                    )
-                                }
-                            }
-                        },
-                        textStyle = MaterialTheme.typography.bodyLarge,
-                        minLines = 12,
-                        maxLines = Int.MAX_VALUE,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
-                    )
+            Spacer(modifier = Modifier.weight(1f))
 
-                    Text(
-                        text = "${text.length} / $maxCharacters",
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .background(
-                                color = DarkSurface.copy(alpha = 0.92f),
-                                shape = MaterialTheme.shapes.small,
-                            )
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-
-                VoiceSelector(
-                    selectedLanguage = selectedLanguage,
-                    expanded = voiceMenuExpanded,
-                    onExpandedChange = { voiceMenuExpanded = it },
-                    onLanguageSelected = {
-                        selectedLanguage = it
-                        voiceMenuExpanded = false
+            if (playbackVisible) {
+                PlaybackSection(
+                    playbackState = playbackState,
+                    sliderPosition = sliderPosition,
+                    sliderIsDragging = sliderIsDragging,
+                    onSliderPositionChange = { value ->
+                        sliderIsDragging = true
+                        sliderPosition = value
+                    },
+                    onSliderChangeFinished = {
+                        sliderIsDragging = false
+                        viewModel.seekPlayback(sliderPosition, selectedLanguage)
                     },
                 )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    Text(
-                        text = buildString {
-                            append("Storage ")
-                            append(if (uiState.permissions.storageGranted) "ready" else "not granted")
-                            append(" • Media ")
-                            append(if (uiState.permissions.mediaGranted) "ready" else "not granted")
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                    )
-                }
             }
         }
     }
@@ -417,6 +544,55 @@ private fun VoiceSelector(
     }
 }
 
+@Composable
+private fun PlaybackSection(
+    playbackState: PlaybackUiState,
+    sliderPosition: Float,
+    sliderIsDragging: Boolean,
+    onSliderPositionChange: (Float) -> Unit,
+    onSliderChangeFinished: () -> Unit,
+) {
+    val sliderValue = if (sliderIsDragging) sliderPosition else playbackState.progressFraction
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (
+            playbackState.status == PlaybackStatus.PREPARING &&
+            playbackState.activeText.length > 700
+        ) {
+            Text(
+                text = "Preparing audio...",
+                style = MaterialTheme.typography.bodySmall,
+                color = MintPrimary,
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = formatDuration(playbackState.elapsedMs),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = formatDuration(playbackState.totalDurationMs),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Slider(
+            value = sliderValue,
+            onValueChange = onSliderPositionChange,
+            onValueChangeFinished = onSliderChangeFinished,
+        )
+    }
+}
+
 private fun readClipboardText(context: Context): String? {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
     val clipData = clipboard?.primaryClip ?: return null
@@ -429,4 +605,24 @@ private fun readClipboardText(context: Context): String? {
         .coerceToText(context)
         ?.toString()
         ?.takeIf { it.isNotBlank() }
+}
+
+private fun normalizeTextFieldValue(
+    value: TextFieldValue,
+    maxCharacters: Int,
+): TextFieldValue {
+    val truncatedText = value.text.take(maxCharacters)
+    val end = value.selection.end.coerceIn(0, truncatedText.length)
+    val start = value.selection.start.coerceIn(0, end)
+    return value.copy(
+        text = truncatedText,
+        selection = TextRange(start, end),
+    )
+}
+
+private fun formatDuration(durationMs: Long): String {
+    val totalSeconds = (durationMs / 1_000L).toInt()
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d:%02d".format(minutes, seconds)
 }
