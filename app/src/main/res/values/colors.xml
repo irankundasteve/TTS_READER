@@ -1,0 +1,6 @@
+<resources>
+    <color name="splash_background">#121212</color>
+    <color name="brand_mint">#75E6C4</color>
+    <color name="brand_mint_deep">#0F766E</color>
+    <color name="launcher_background">#0F1413</color>
+</resources>
