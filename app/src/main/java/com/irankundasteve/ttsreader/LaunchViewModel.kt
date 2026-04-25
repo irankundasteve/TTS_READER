@@ -34,10 +34,14 @@ data class LaunchUiState(
     val ttsReady: Boolean = false,
 )
 
-enum class SupportedLanguage(val tag: String, val label: String) {
-    ENGLISH("en", "English"),
-    SWAHILI("sw", "Swahili"),
-    KIRUNDI("rn", "Kirundi");
+enum class SupportedLanguage(
+    val tag: String,
+    val label: String,
+    val voiceLabel: String,
+) {
+    ENGLISH("en-US", "English", "English - US"),
+    SWAHILI("sw", "Swahili", "Swahili"),
+    KIRUNDI("rn", "Kirundi", "Kirundi");
 
     companion object {
         fun fromTag(tag: String?): SupportedLanguage {
